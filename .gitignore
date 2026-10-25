@@ -1,0 +1,7 @@
+.venv/
+.pip-tmp/
+uploads_tmp/
+financeiro.db
+__pycache__/
+.idea/
+*.pyc
