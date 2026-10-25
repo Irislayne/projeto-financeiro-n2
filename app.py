@@ -5,6 +5,7 @@ import base64
 import uuid
 import traceback
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 from flask import Flask, request, jsonify, render_template
 from flask_sqlalchemy import SQLAlchemy
@@ -221,6 +222,38 @@ def extrair_json_da_resposta(texto_resposta: str) -> dict:
 def normalizar_documento(documento: str) -> str:
     return re.sub(r"\D", "", documento or "")
 
+def normalizar_valor(valor, campo: str):
+    """Aceita números JSON e valores monetários textuais usados por alguns modelos."""
+    if isinstance(valor, bool) or valor is None:
+        raise ValueError(f"{campo} não foi informado como um valor válido.")
+    if isinstance(valor, (int, float, Decimal)):
+        numero = Decimal(str(valor))
+    elif isinstance(valor, str):
+        texto = re.sub(r"[^0-9,.-]", "", valor.strip())
+        if not texto:
+            raise ValueError(f"{campo} não foi informado como um valor válido.")
+        if "," in texto:
+            texto = texto.replace(".", "").replace(",", ".")
+        try:
+            numero = Decimal(texto)
+        except InvalidOperation as erro:
+            raise ValueError(f"{campo} não foi informado como um valor válido.") from erro
+    else:
+        raise ValueError(f"{campo} não foi informado como um valor válido.")
+    if not numero.is_finite() or numero <= 0:
+        raise ValueError(f"{campo} deve ser maior que zero.")
+    return float(numero)
+
+def normalizar_data(data, campo: str):
+    """Padroniza datas extraídas para DD/MM/AAAA e devolve erro de validação legível."""
+    texto = str(data or "").strip()
+    for formato in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(texto, formato).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    raise ValueError(f"{campo} está ausente ou inválida. Use DD/MM/AAAA.")
+
 def buscar_pessoa_ativa(documento: str, nome: str, tipo: str):
     pessoas = Pessoa.query.filter_by(tipo=tipo, status="ATIVO").all()
     documento_normalizado = normalizar_documento(documento)
@@ -388,22 +421,28 @@ def lancar_movimento():
         nota_fiscal = dados.get("nota_fiscal") or {}
         if not all(isinstance(item, dict) for item in (fornecedor_info, faturado_info, nota_fiscal)):
             return jsonify({"sucesso": False, "erro": "Dados de fornecedor, faturado ou nota fiscal inválidos."}), 400
-        valor_total = dados.get("valor_total")
         if not isinstance(parcelas_lista, list) or not parcelas_lista:
             return jsonify({"sucesso": False, "erro": "A nota deve possuir ao menos uma parcela válida."}), 400
-        if not isinstance(valor_total, (int, float)) or isinstance(valor_total, bool) or valor_total <= 0:
-            return jsonify({"sucesso": False, "erro": "Valor total da nota inválido."}), 400
-        if not (fornecedor_info.get("razao_social") or "").strip() or not (faturado_info.get("nome_completo") or "").strip():
-            return jsonify({"sucesso": False, "erro": "Fornecedor e faturado precisam ter nome identificado no documento."}), 400
-        vencimentos = set()
-        for parcela in parcelas_lista:
-            if not isinstance(parcela, dict) or not parcela.get("data_vencimento"):
-                return jsonify({"sucesso": False, "erro": "Cada parcela precisa de data de vencimento."}), 400
-            if parcela["data_vencimento"] in vencimentos:
-                return jsonify({"sucesso": False, "erro": "As datas de vencimento das parcelas devem ser distintas."}), 400
-            vencimentos.add(parcela["data_vencimento"])
-            if not isinstance(parcela.get("valor_parcela"), (int, float)) or isinstance(parcela.get("valor_parcela"), bool) or parcela["valor_parcela"] <= 0:
-                return jsonify({"sucesso": False, "erro": "Valor de parcela inválido."}), 400
+        nome_fornecedor = str(fornecedor_info.get("razao_social") or "").strip()
+        nome_faturado = str(faturado_info.get("nome_completo") or "").strip()
+        if not nome_fornecedor or not nome_faturado:
+            return jsonify({"sucesso": False, "erro": "O lançamento não foi gravado: o PDF precisa informar o nome do fornecedor e do faturado. Reanalise o documento e confira a extração."}), 400
+        try:
+            valor_total = normalizar_valor(dados.get("valor_total"), "Valor total da nota")
+            vencimentos = set()
+            for indice, parcela in enumerate(parcelas_lista, 1):
+                if not isinstance(parcela, dict):
+                    raise ValueError(f"A parcela {indice} está em formato inválido.")
+                parcela["data_vencimento"] = normalizar_data(parcela.get("data_vencimento"), f"Vencimento da parcela {indice}")
+                parcela["valor_parcela"] = normalizar_valor(parcela.get("valor_parcela"), f"Valor da parcela {indice}")
+                if parcela["data_vencimento"] in vencimentos:
+                    raise ValueError("As datas de vencimento das parcelas devem ser distintas.")
+                vencimentos.add(parcela["data_vencimento"])
+        except ValueError as erro:
+            return jsonify({"sucesso": False, "erro": f"O lançamento não foi gravado: {erro}"}), 400
+        # Converte campos textuais opcionais para strings antes de persistir.
+        fornecedor_info["razao_social"] = nome_fornecedor
+        faturado_info["nome_completo"] = nome_faturado
 
         # Recalcula no servidor para não confiar na análise enviada pelo navegador.
         analise = analisar_dados_no_banco(dados)
@@ -411,7 +450,7 @@ def lancar_movimento():
         if analise["fornecedor"]["status"] == "NÃO EXISTE":
             novo_fornecedor = Pessoa(
                 razao_social=fornecedor_info["razao_social"].strip(),
-                documento=(fornecedor_info.get("cnpj") or "").strip() or None,
+                documento=str(fornecedor_info.get("cnpj") or "").strip() or None,
                 tipo="CLIENTE-FORNECEDOR",
                 status="ATIVO"
             )
@@ -424,7 +463,7 @@ def lancar_movimento():
         if analise["faturado"]["status"] == "NÃO EXISTE":
             novo_faturado = Pessoa(
                 razao_social=faturado_info["nome_completo"].strip(),
-                documento=(faturado_info.get("cpf") or "").strip() or None,
+                documento=str(faturado_info.get("cpf") or "").strip() or None,
                 tipo="FATURADO",
                 status="ATIVO"
             )

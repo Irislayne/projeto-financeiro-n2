@@ -114,21 +114,33 @@ const ordenacao = {pessoas:{campo:'id',direcao:1}, classificacoes:{campo:'id',di
 const $ = id => document.getElementById(id);
 function escapar(valor) { return String(valor ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function alerta(mensagem, tipo='success') { const box=document.createElement('div'); box.className=`alert alert-${tipo} alert-dismissible fade show`; box.setAttribute('role','alert'); box.append(document.createTextNode(mensagem)); const b=document.createElement('button'); b.type='button'; b.className='btn-close'; b.setAttribute('data-bs-dismiss','alert'); box.append(b); $('alerta-global').replaceChildren(box); }
-async function jsonFetch(url, options={}) { const r=await fetch(url,options); const body=await r.json(); if(!r.ok || body.sucesso===false) throw new Error(body.erro || 'Não foi possível concluir a solicitação.'); return body; }
+async function jsonFetch(url, options={}) { const r=await fetch(url,options); let body; try { body=await r.json(); } catch { throw new Error(`O servidor respondeu com erro HTTP ${r.status}. Confira os logs do servidor.`); } if(!r.ok || body.sucesso===false) throw new Error(body.erro || `Não foi possível concluir a solicitação (HTTP ${r.status}).`); return body; }
 const jsonBody = data => ({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+
+function exibirAnalise(dados, analise) {
+  dadosExtraidosCache=dados; analiseBancoCache=analise;
+  $('res-fornecedor-nome').textContent=analise.fornecedor.razao_social;
+  $('res-fornecedor-doc').textContent=`CNPJ: ${analise.fornecedor.documento}`;
+  $('badge-fornecedor').textContent=analise.fornecedor.mensagem;
+  $('badge-fornecedor').className=`badge ${analise.fornecedor.status==='EXISTE'?'bg-success':'bg-danger'}`;
+  $('res-faturado-nome').textContent=analise.faturado.nome;
+  $('res-faturado-doc').textContent=`CPF: ${analise.faturado.documento}`;
+  $('badge-faturado').textContent=analise.faturado.mensagem;
+  $('badge-faturado').className=`badge ${analise.faturado.status==='EXISTE'?'bg-success':'bg-danger'}`;
+  $('res-despesas').replaceChildren(...(analise.despesas||[analise.despesa]).map(d=>{const div=document.createElement('div');div.className='mb-2';const title=document.createElement('div');title.className='fw-bold';title.textContent=[d.descricao,d.subcategoria].filter(Boolean).join(' / ');const badge=document.createElement('span');badge.className=`badge ${d.status==='EXISTE'?'bg-success':'bg-danger'}`;badge.textContent=d.mensagem;div.append(title,badge);return div;}));
+  $('painel-analise').hidden=false;
+}
+try { const pendente=JSON.parse(sessionStorage.getItem('analiseFiscalPendente')||'null'); if(pendente?.dados && pendente?.analise) { exibirAnalise(pendente.dados,pendente.analise); alerta('Análise restaurada nesta aba. Confira os dados e tente lançar novamente.','info'); } } catch { sessionStorage.removeItem('analiseFiscalPendente'); }
 
 $('form-upload').addEventListener('submit', async e=>{
   e.preventDefault(); const file=$('arquivo-pdf').files[0]; if(!file)return;
   const btn=$('btn-analisar'); btn.disabled=true; btn.textContent='Analisando…'; const fd=new FormData(); fd.append('arquivo',file);
   try {
-    const res=await jsonFetch('/api/extrair-dados',{method:'POST',body:fd}); dadosExtraidosCache=res.dados; analiseBancoCache=res.analise_banco;
-    $('res-fornecedor-nome').textContent=res.analise_banco.fornecedor.razao_social; $('res-fornecedor-doc').textContent=`CNPJ: ${res.analise_banco.fornecedor.documento}`; $('badge-fornecedor').textContent=res.analise_banco.fornecedor.mensagem; $('badge-fornecedor').className=`badge ${res.analise_banco.fornecedor.status==='EXISTE'?'bg-success':'bg-danger'}`;
-    $('res-faturado-nome').textContent=res.analise_banco.faturado.nome; $('res-faturado-doc').textContent=`CPF: ${res.analise_banco.faturado.documento}`; $('badge-faturado').textContent=res.analise_banco.faturado.mensagem; $('badge-faturado').className=`badge ${res.analise_banco.faturado.status==='EXISTE'?'bg-success':'bg-danger'}`;
-    $('res-despesas').replaceChildren(...(res.analise_banco.despesas||[res.analise_banco.despesa]).map(d=>{const div=document.createElement('div');div.className='mb-2';const title=document.createElement('div');title.className='fw-bold';title.textContent=[d.descricao,d.subcategoria].filter(Boolean).join(' / ');const badge=document.createElement('span');badge.className=`badge ${d.status==='EXISTE'?'bg-success':'bg-danger'}`;badge.textContent=d.mensagem;div.append(title,badge);return div;}));
-    $('painel-analise').hidden=false; alerta('Análise realizada. Confira os dados antes de gravar.','info');
+    const res=await jsonFetch('/api/extrair-dados',{method:'POST',body:fd}); exibirAnalise(res.dados,res.analise_banco); try { sessionStorage.setItem('analiseFiscalPendente',JSON.stringify({dados:res.dados,analise:res.analise_banco})); } catch { alerta('Análise concluída. O navegador não permitiu guardá-la temporariamente; evite atualizar esta aba antes de lançar.','warning'); }
+    alerta('Análise realizada. Confira os dados antes de gravar.','info');
   } catch(err){alerta(err.message,'danger');} finally {btn.disabled=false;btn.innerHTML='<i class="bi bi-search me-1"></i>Analisar documento';}
 });
-$('btn-confirmar-lancamento').addEventListener('click',async()=>{if(!dadosExtraidosCache)return;const b=$('btn-confirmar-lancamento');b.disabled=true;try{const res=await jsonFetch('/api/lancar-movimento',jsonBody({dados:dadosExtraidosCache,analise_banco:analiseBancoCache}));alerta(res.mensagem);$('painel-analise').hidden=true;dadosExtraidosCache=null;await carregarPessoas();}catch(err){alerta(err.message,'danger');}finally{b.disabled=false;}});
+$('btn-confirmar-lancamento').addEventListener('click',async()=>{if(!dadosExtraidosCache)return;const b=$('btn-confirmar-lancamento');b.disabled=true;try{const res=await jsonFetch('/api/lancar-movimento',jsonBody({dados:dadosExtraidosCache,analise_banco:analiseBancoCache}));alerta(res.mensagem);$('painel-analise').hidden=true;dadosExtraidosCache=null;analiseBancoCache=null;sessionStorage.removeItem('analiseFiscalPendente');await carregarPessoas();}catch(err){alerta(err.message,'danger');}finally{b.disabled=false;}});
 
 function mostrarFormPessoa(p=null){$('form-pessoa').hidden=false;$('pessoa-id').value=p?.id||'';$('pessoa-nome').value=p?.razao_social||'';$('pessoa-documento').value=p?.documento||'';$('pessoa-tipo').value=p?.tipo||'CLIENTE-FORNECEDOR';$('pessoa-nome').focus();}
 $('btn-nova-pessoa').onclick=()=>mostrarFormPessoa();$('btn-cancelar-pessoa').onclick=()=>{$('form-pessoa').hidden=true;};
