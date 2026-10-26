@@ -137,6 +137,26 @@ CATEGORIAS_DESPESA = {
 
 CATEGORIAS_PRINCIPAIS = list(CATEGORIAS_DESPESA.keys())
 
+# Em uma base recém-criada (comum após deploy em hospedagem com SQLite efêmero),
+# disponibiliza categorias padrão para que o formulário manual não fique vazio.
+with app.app_context():
+    for descricao, subcategorias in CATEGORIAS_DESPESA.items():
+        for subcategoria in subcategorias:
+            existente = Classificacao.query.filter_by(
+                descricao=descricao, subcategoria=subcategoria, tipo="DESPESA"
+            ).first()
+            if existente is None:
+                db.session.add(Classificacao(
+                    descricao=descricao, subcategoria=subcategoria,
+                    tipo="DESPESA", status="ATIVO"
+                ))
+    if not Classificacao.query.filter_by(tipo="RECEITA").first():
+        db.session.add(Classificacao(
+            descricao="RECEITAS OPERACIONAIS", subcategoria="Vendas e serviços",
+            tipo="RECEITA", status="ATIVO"
+        ))
+    db.session.commit()
+
 def montar_prompt_extracao() -> str:
     lista_categorias_formatada = "\n".join(
         f"- {categoria_principal}: {', '.join(subitens)}"
